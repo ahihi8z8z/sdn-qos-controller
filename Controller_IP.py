@@ -34,6 +34,7 @@ import os
 import random
 import time
 import logging
+import random
 
 from libovsdb import libovsdb
 import json
@@ -140,7 +141,9 @@ class ProjectController(app_manager.RyuApp):
         self.init_bw_max = defaultdict(defaultdict(int)) #{switch_id:{meter_id:[init_bw_max,in_port,out_port}}
         self.cr_bw_max = defaultdict(defaultdict(int)) #{switch_id:{meter_id:cr_bw_max}}
         self.cr_bw_usage = defaultdict(defaultdict(int)) #{switch_id:{meter_id:cur_bw_usage}}
-
+        self.init_bw_be = defaultdict(defaultdict(int))
+        self.cr_bw_be_max = defaultdict(defaultdict(int))
+        self.cr_bw_be_usage = defaultdict(defaultdict(int))
         
         if DEBUGING == 1:
             self.logger.setLevel(logging.DEBUG)
@@ -174,8 +177,52 @@ class ProjectController(app_manager.RyuApp):
                                    meter_id=meter_id, 
                                    bands=bands)
         switch.send_msg(request)
-        
-        
+
+    def is_bandwidth_equal(self, switch, port, meter_id, link_bandwidth = REFERENCE_BW):
+    # Calculate the sum of current bandwidth values
+        total_current_bandwidth = sum(self.cr_bw_usage[switch][port][meter_id], self.cr_bw_be_usage[switch][port][meter_id])
+    # Check if the sum is equal to the link bandwidth
+        return total_current_bandwidth == link_bandwidth
+    def is_bandwidth_lower(self,switch, port, meter_id, link_bandwidth = REFERENCE_BW):
+    # Calculate the sum of current bandwidth values
+        total_current_bandwidth = sum(self.cr_bw_usage[switch][port][meter_id], self.cr_bw_be_usage[switch][port][meter_id])
+    # Check if the sum is lower than the link bandwidth
+        return total_current_bandwidth < link_bandwidth
+    def is_usage_be_lower(self,switch, port, meter_id):  
+    # Check if the sum is lower than the link bandwidth
+        return self.cr_bw_be_usage[switch][port][meter_id] < self.cr_bw_be_max[switch][port][meter_id]
+    
+    def method_QOS(self, switches, queue_values, meter_id, port, link_bandwidth = REFERENCE_BW):
+        check_equal = self.is_bandwidth_equal()
+        check_lower = self.is_bandwidth_lower()
+        check_be_lower = self.is_usage_be_lower()
+        for switch_id in switches:
+           for port_id in port:
+               for id_meter in meter_id:
+                    for initial_value in enumerate(queue_values):
+                        self.init_bw_max[switch_id][port_id][id_meter] = initial_value
+                        self.cr_max_bw[switch_id][port_id][id_meter] = self.init_bw_max[switch_id][port_id][id_meter]
+                        self.init_bw_be[switch_id][port_id][id_meter] = link_bandwidth - sum(self.init_bw_max[switch_id][port_id][id_meter])
+
+        for switch_id in switches:
+            for port_id in port:
+                for id_meter in meter_id:
+                    if check_equal:  #C1
+                        self.cr_max_bw[switch_id][port_id][id_meter] = self.init_bw_max[switch_id][port_id][id_meter]
+                        self.cr_bw_be_max[switch_id][port_id][id_meter] = self.init_bw_be[switch_id][port_id][id_meter]
+                    elif check_lower: #C2
+                        if check_be_lower: #C2b2
+                            if (self.cr_bw_usage[switch_id][port_id][id_meter] > self.cr_bw_max[switch_id][port_id][id_meter]):#C2b2a2
+                                pass
+                            else: #C2b2a1
+                                num_ran = random.uniform(0, 1)
+                                self.cr_bw_be_max[switch_id][port_id][id_meter] -= num_ran * self.cr_bw_be_usage[switch_id][port_id][id_meter]
+                                self.cr_bw_max[switch_id][port_id][id_meter] += num_ran * (self.init_bw_max[switch_id][port_id][id_meter] / sum(self.init_bw_max[switch_id][port_id][id_meter])) * (self.cr_bw_max[switch_id][port_id][id_meter] - self.cr_bw_be_usage[switch_id][port_id][id_meter])
+                        else: #C2b1
+                            if (self.cr_bw_usage[switch_id][port_id][id_meter] < self.cr_bw_max[switch_id][port_id][id_meter]):#C2b1a2
+                                num_random = random.uniform(0, 1)
+                                self.cr_bw_be_max[switch_id][port_id][id_meter] += num_random * (self.cr_bw_be_max[switch_id][port_id][id_meter] - self.cr_bw_be_usage[switch_id][port_id][id_meter])
+                            
     def configure_qos(self,port):
         ovs_bridge = bridge.OVSBridge(self.CONF, dpid, ovsdb_server)
         try:
@@ -943,7 +990,7 @@ class ProjectController(app_manager.RyuApp):
                     self._request_meter_stats(dp)
             hub.sleep(self.sleep)
 
-    def handle_meter_band(self):
+    #def handle_meter_band(self):
 
     def _request_port_stats(self, datapath, port=None):
         self.logger.debug('send port stats request: %016x', datapath.id)
@@ -1877,7 +1924,7 @@ class ProjectController(app_manager.RyuApp):
         dp = msg.datapath
         ofp = dp.ofproto
 
-        if self.meter_bands[dp.id]:
+        #if self.meter_bands[dp.id]:
         for stat in msg.body:
             meters.append('meter_id=0x%08x len=%d flow_count=%d '
                         'packet_in_count=%d byte_in_count=%d '
